@@ -1,6 +1,7 @@
 package native
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -36,11 +37,11 @@ type Process interface {
 // DockerProcess is the process running as a docker container
 type DockerProcess struct {
 	basedir  string
-	startcmd string
+	startcmd *exec.Cmd
 	envs     []string
 	mounts   []string
-	// ports    []string
-	cfg *contract.NativeDockerConfig
+	ports    []string
+	cfg      *contract.NativeDockerConfig
 
 	id string
 	log.Logger
@@ -71,17 +72,13 @@ func (d *DockerProcess) Start() error {
 	for _, mount := range d.mounts {
 		volumes[mount] = struct{}{}
 	}
-
-	cmd := []string{
-		"sh", "-c",
-		d.startcmd,
-	}
+	// cmd.Args contains cmd binpath
+	cmd := d.startcmd.Args
 
 	env := []string{
 		"XCHAIN_PING_TIMEOUT=" + strconv.Itoa(pingTimeoutSecond),
 	}
 	env = append(env, d.envs...)
-	env = append(env, os.Environ()...)
 
 	user := strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
 
@@ -95,35 +92,40 @@ func (d *DockerProcess) Start() error {
 		binds[i] = d.mounts[i] + ":" + d.mounts[i]
 	}
 
-	// portBinds := make(map[docker.Port][]docker.PortBinding)
-	// for _, port := range d.ports {
-	// 	key := docker.Port(port + "/tcp")
-	// 	value := []docker.PortBinding{
-	// 		{
-	// 			HostIP:   "127.0.0.1",
-	// 			HostPort: port,
-	// 		},
-	// 	}
-	// 	portBinds[key] = value
-	// }
+	portBinds := make(map[docker.Port][]docker.PortBinding)
+	exposedPorts := map[docker.Port]struct{}{}
+
+	for _, port := range d.ports {
+		key := docker.Port(port + "/tcp")
+		value := []docker.PortBinding{
+			{
+				HostIP:   "127.0.0.1",
+				HostPort: port,
+			},
+		}
+		portBinds[key] = value
+		exposedPorts[key] = struct{}{}
+	}
 
 	opts := docker.CreateContainerOptions{
 		Config: &docker.Config{
-			Volumes:    volumes,
-			Env:        env,
-			WorkingDir: d.basedir,
-			// NetworkDisabled: true,
+			ExposedPorts: exposedPorts,
+			Volumes:      volumes,
+			Env:          env,
+			WorkingDir:   d.basedir,
+			//NetworkDisabled: true,
 			Image: d.cfg.ImageName,
 			Cmd:   cmd,
 			User:  user,
 		},
 		HostConfig: &docker.HostConfig{
-			NetworkMode: "host",
-			AutoRemove:  true,
-			Binds:       binds,
-			CPUPeriod:   cpulimit,
-			Memory:      memlimit,
-			// PortBindings: portBinds,
+			NetworkMode:     "bridge",
+			AutoRemove:      true,
+			Binds:           binds,
+			CPUPeriod:       cpulimit,
+			Memory:          memlimit,
+			PortBindings:    portBinds,
+			PublishAllPorts: true,
 		},
 	}
 	container, err := client.CreateContainer(opts)
@@ -132,7 +134,6 @@ func (d *DockerProcess) Start() error {
 	}
 	d.Info("create container success", "id", container.ID)
 	d.id = container.ID
-
 	err = client.StartContainer(d.id, nil)
 	if err != nil {
 		return err
@@ -160,7 +161,7 @@ func (d *DockerProcess) Stop(timeout time.Duration) error {
 // HostProcess is the process running as a native process
 type HostProcess struct {
 	basedir  string
-	startcmd string
+	startcmd *exec.Cmd
 	envs     []string
 
 	cmd *exec.Cmd
@@ -169,7 +170,7 @@ type HostProcess struct {
 
 // Start implements process interface
 func (h *HostProcess) Start() error {
-	cmd := exec.Command("sh", "-c", h.startcmd)
+	cmd := h.startcmd
 	cmd.Dir = h.basedir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
@@ -177,9 +178,10 @@ func (h *HostProcess) Start() error {
 	}
 	cmd.Env = []string{"XCHAIN_PING_TIMEOUT=" + strconv.Itoa(pingTimeoutSecond)}
 	cmd.Env = append(cmd.Env, h.envs...)
-	cmd.Env = append(cmd.Env, os.Environ()...)
+	//cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	fmt.Println(cmd.Env)
 
 	if err := cmd.Start(); err != nil {
 		return err
